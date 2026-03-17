@@ -1,9 +1,13 @@
-name: Build and Push Docker Image to ECR
+name: Build app and Push Docker Image to ECR
 
 on:
   push:
     branches:
       - main
+    paths:
+      - 'app/**' # Trigger only if files in the 'app' directory change
+  workflow_dispatch: # Allows manual trigger
+      
 
 env:
   ECR_REPOSITORY: 2048-game
@@ -30,7 +34,7 @@ jobs:
 
       - name: Build Docker image
         run: |
-          docker build -t $ECR_REPOSITORY:$IMAGE_TAG .
+          docker build -t $ECR_REPOSITORY:$IMAGE_TAG ./app
 
       - name: Tag image for ECR
         run: |

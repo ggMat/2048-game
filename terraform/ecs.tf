@@ -41,6 +41,7 @@ resource "aws_ecs_service" "app_service" {
   network_configuration {
     subnets         = module.vpc.public_subnets
     security_groups = [aws_security_group.ecs_sg.id]
+    assign_public_ip = true
   }
 
   load_balancer {

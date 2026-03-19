@@ -1,25 +1,29 @@
-name: Build app and Push Docker Image to ECR
+name: Build app, Push Image, Deploy ECS
 
 on:
   push:
     branches:
       - main
     paths:
-      - 'app/**' # Trigger only if files in the 'app' directory change
+      - 'app/**'  # Trigger only if files in the 'app' directory change
   workflow_dispatch: # Allows manual trigger
-      
 
 env:
   ECR_REPOSITORY: 2048-game
-  IMAGE_TAG: latest
+  ECS_CLUSTER: 2048-game-cluster
+  ECS_SERVICE: 2048-game-service
+  TASK_FAMILY: 2048-game-task
 
 jobs:
-  build:
+  build-and-deploy:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Get commit SHA
+        run: echo "IMAGE_TAG=${GITHUB_SHA::7}" >> $GITHUB_ENV
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -29,19 +33,57 @@ jobs:
           aws-region: ${{ secrets.AWS_REGION }}
 
       - name: Login to ECR
-        id: login-ecr
+        id: login
         uses: aws-actions/amazon-ecr-login@v2
 
       - name: Build Docker image
         run: |
           docker build -t $ECR_REPOSITORY:$IMAGE_TAG ./app
 
-      - name: Tag image for ECR
+      - name: Tag image
         run: |
           docker tag $ECR_REPOSITORY:$IMAGE_TAG \
-          ${{ steps.login-ecr.outputs.registry }}/$ECR_REPOSITORY:$IMAGE_TAG
+          ${{ steps.login.outputs.registry }}/$ECR_REPOSITORY:$IMAGE_TAG
 
-      - name: Push image to ECR
+      - name: Push image
         run: |
           docker push \
-          ${{ steps.login-ecr.outputs.registry }}/$ECR_REPOSITORY:$IMAGE_TAG
+          ${{ steps.login.outputs.registry }}/$ECR_REPOSITORY:$IMAGE_TAG
+
+      - name: Check if ECS service exists
+        id: ecs-check
+        run: |
+          if aws ecs describe-services \
+            --cluster $ECS_CLUSTER \
+            --services $ECS_SERVICE \
+            --query "services[0].status" \
+            --output text 2>/dev/null | grep -q ACTIVE; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Deploy to ECS
+        if: steps.ecs-check.outputs.exists == 'true'
+        run: |
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+
+          IMAGE_URI="$ACCOUNT_ID.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/$ECR_REPOSITORY:$IMAGE_TAG"
+
+          TASK_DEF=$(aws ecs describe-task-definition \
+            --task-definition $TASK_FAMILY \
+            --query taskDefinition)
+
+          NEW_TASK_DEF=$(echo $TASK_DEF | jq --arg IMAGE "$IMAGE_URI" \
+            '.containerDefinitions[0].image = $IMAGE |
+             del(.taskDefinitionArn,.revision,.status,.requiresAttributes,.compatibilities,.registeredAt,.registeredBy)')
+
+          echo "$NEW_TASK_DEF" > task-def.json
+
+          aws ecs register-task-definition \
+            --cli-input-json file://task-def.json
+
+          aws ecs update-service \
+            --cluster $ECS_CLUSTER \
+            --service $ECS_SERVICE \
+            --force-new-deployment
